@@ -4,7 +4,9 @@
 
 ## 效果预览
 
-![狐狸待办小组件效果图](docs/preview.png)
+<p align="center">
+  <img src="./docs/preview.png" width="720" alt="狐狸待办小组件效果图">
+</p>
 
 ## 功能
 
