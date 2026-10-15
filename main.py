@@ -1296,8 +1296,8 @@ class MainWindow(QWidget):
         self.min_button = FlatButton("–", header)
         self.min_button.setFixedSize(24, 24)
         self.min_button.setFont(font(16, QFont.Normal))
-        self.min_button.setToolTip("最小化")
-        self.min_button.clicked.connect(self.showMinimized)
+        self.min_button.setToolTip("收起（点击狐狸恢复）")
+        self.min_button.clicked.connect(lambda: self.collapse_to_edge("right"))
         header_layout.addWidget(self.min_button)
 
         self.close_button = FlatButton("×", header)
