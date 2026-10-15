@@ -1,0 +1,9 @@
+FoxTodoWidget Windows release
+
+Install:
+1. Extract the complete release folder.
+2. Run install.bat.
+3. The app will be copied to %LOCALAPPDATA%\FoxTodoWidget and a desktop shortcut will be created.
+
+On first launch, choose a city or use automatic IP-based city detection.
+Click the weather label later to change the city.

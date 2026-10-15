@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 .pytest_cache/
 .mypy_cache/
+build/
+release/
+*.spec
 
 # Local runtime data and generated work logs
 data/*

@@ -11,6 +11,7 @@ import random
 import sys
 import uuid
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 from PyQt5.QtCore import (
     QPoint,
@@ -41,6 +42,7 @@ from PyQt5.QtNetwork import (
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -57,16 +59,25 @@ from PyQt5.QtWidgets import (
 )
 
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(os.path.abspath(sys.executable))
+    RESOURCE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    RESOURCE_DIR = APP_DIR
 DATA_DIR = os.path.join(APP_DIR, "data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
-ASSET_DIR = os.path.join(APP_DIR, "assets")
+ASSET_DIR = os.path.join(RESOURCE_DIR, "assets")
 INSTANCE_NAME = "fox_todo_widget_single_instance_v1"
 MUTEX_NAME = "FoxTodoWidgetMutexV1"
-FIXED_WEATHER_LOCATION = "福州鼓楼"
-WEATHER_LATITUDE = 26.1025
-WEATHER_LONGITUDE = 119.2965
+DEFAULT_LOCATION = {
+    "name": "福州鼓楼",
+    "latitude": 26.1025,
+    "longitude": 119.2965,
+}
+IP_LOCATION_URL = "https://ipwho.is/"
+GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 CARD_WIDTH = 340
 CARD_HEIGHT = 360
 FOX_OVERHANG = 52
@@ -114,6 +125,20 @@ def format_memo_timestamp(value: str) -> str:
     return parsed.strftime("%m月%d日 %H:%M")
 
 
+def normalize_location(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    name = str(value.get("name", "")).strip()
+    try:
+        latitude = float(value.get("latitude"))
+        longitude = float(value.get("longitude"))
+    except (TypeError, ValueError):
+        return None
+    if not name or not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+        return None
+    return {"name": name, "latitude": latitude, "longitude": longitude}
+
+
 def default_state() -> dict:
     return {
         "todos": [],
@@ -122,6 +147,7 @@ def default_state() -> dict:
         "memos": [],
         "active_memo_id": None,
         "memo_mode": False,
+        "location": None,
     }
 
 
@@ -143,6 +169,7 @@ def load_state() -> dict:
         state["active_tab"] = raw.get("active_tab", "todo")
         state["active_memo_id"] = raw.get("active_memo_id")
         state["memo_mode"] = bool(raw.get("memo_mode", False))
+        state["location"] = normalize_location(raw.get("location"))
         if state["active_tab"] not in {"todo", "done", "habit"}:
             state["active_tab"] = "todo"
         if isinstance(todos, list):
@@ -346,6 +373,19 @@ class CharacterLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
 class BookmarkRibbon(QWidget):
     """A soft bookmark ribbon that sits behind the fox at the card's top-left."""
 
@@ -489,6 +529,199 @@ class FlatButton(QPushButton):
             QPushButton:hover {{ background: {PALETTE['peach']}; }}
             QPushButton:pressed {{ background: {PALETTE['line']}; }}
             """
+        )
+
+
+class LocationDialog(QDialog):
+    """Small themed first-run dialog for selecting or detecting a city."""
+
+    def __init__(self, parent: QWidget | None = None, current: dict | None = None) -> None:
+        super().__init__(parent)
+        self.selected_location: dict | None = None
+        self.pending_kind = ""
+        self.pending_query = ""
+        self.network = QNetworkAccessManager(self)
+        self.reply: QNetworkReply | None = None
+
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setFixedSize(360, 250)
+
+        panel = QFrame(self)
+        panel.setGeometry(0, 0, 360, 250)
+        panel.setStyleSheet(
+            f"QFrame {{ background: {PALETTE['card']}; border: 1px solid {PALETTE['line']}; "
+            "border-radius: 22px; }}"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(22, 17, 22, 17)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("设置天气地点", panel)
+        title.setFont(font(15, QFont.Bold))
+        title.setStyleSheet(f"color: {PALETTE['brown']}; background: transparent;")
+        header.addWidget(title, 1)
+        close_button = FlatButton("×", panel)
+        close_button.setFixedSize(26, 26)
+        close_button.setFont(font(17, QFont.Normal))
+        close_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['brown_soft']}; background: transparent; "
+            "border: none; border-radius: 13px; padding: 0; }"
+            f"QPushButton:hover {{ background: {PALETTE['peach']}; }}"
+        )
+        close_button.clicked.connect(self.reject)
+        header.addWidget(close_button)
+        layout.addLayout(header)
+
+        subtitle = QLabel("输入城市名，或根据公网 IP 自动识别城市", panel)
+        subtitle.setFont(font(9))
+        subtitle.setStyleSheet(f"color: {PALETTE['muted']}; background: transparent;")
+        layout.addWidget(subtitle)
+
+        self.city_input = QLineEdit(panel)
+        current_name = str((current or {}).get("name", "")).strip()
+        self.city_input.setText(current_name)
+        self.city_input.setPlaceholderText("例如：福州鼓楼、杭州、上海")
+        self.city_input.setFont(font(10))
+        self.city_input.setStyleSheet(
+            f"QLineEdit {{ color: {PALETTE['brown']}; background: {PALETTE['white']}; "
+            f"border: 1px solid {PALETTE['line']}; border-radius: 14px; padding: 7px 11px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {PALETTE['orange']}; }}"
+        )
+        self.city_input.returnPressed.connect(self.lookup_city)
+        layout.addWidget(self.city_input)
+
+        self.status_label = QLabel("天气会按照这个地点显示", panel)
+        self.status_label.setWordWrap(True)
+        self.status_label.setFont(font(8))
+        self.status_label.setStyleSheet(f"color: {PALETTE['brown_soft']}; background: transparent;")
+        layout.addWidget(self.status_label)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 2, 0, 0)
+        button_row.setSpacing(7)
+        self.auto_button = FlatButton("自动识别", panel)
+        self.auto_button.setFixedHeight(31)
+        self.auto_button.setFont(font(10, QFont.Bold))
+        self.auto_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['mint_dark']}; "
+            "border: none; border-radius: 15px; padding: 0 12px; }"
+            f"QPushButton:hover {{ background: {PALETTE['orange']}; }}"
+        )
+        self.auto_button.clicked.connect(self.auto_detect)
+        button_row.addWidget(self.auto_button)
+
+        self.skip_button = FlatButton("稍后设置", panel)
+        self.skip_button.setFixedHeight(31)
+        self.skip_button.setFont(font(9))
+        self.skip_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['brown_soft']}; background: transparent; "
+            "border: none; border-radius: 15px; padding: 0 8px; }"
+            f"QPushButton:hover {{ background: {PALETTE['peach']}; }}"
+        )
+        self.skip_button.clicked.connect(self.reject)
+        button_row.addWidget(self.skip_button)
+
+        self.confirm_button = FlatButton("使用这个城市", panel)
+        self.confirm_button.setFixedHeight(31)
+        self.confirm_button.setFont(font(10, QFont.Bold))
+        self.confirm_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['orange']}; "
+            "border: none; border-radius: 15px; padding: 0 12px; }"
+            f"QPushButton:hover {{ background: {PALETTE['orange_dark']}; }}"
+        )
+        self.confirm_button.clicked.connect(self.lookup_city)
+        button_row.addWidget(self.confirm_button)
+        layout.addLayout(button_row)
+
+        privacy = QLabel("自动识别只能定位到城市级别，且可能受网络运营商影响。", panel)
+        privacy.setFont(font(7))
+        privacy.setStyleSheet(f"color: {PALETTE['muted']}; background: transparent;")
+        layout.addWidget(privacy)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.auto_button.setEnabled(not busy)
+        self.confirm_button.setEnabled(not busy)
+        self.city_input.setEnabled(not busy)
+
+    def lookup_city(self) -> None:
+        query = self.city_input.text().strip()
+        if not query:
+            self.status_label.setText("请先输入城市名")
+            return
+        self.pending_kind = "geocode"
+        self.pending_query = query
+        encoded = quote(query)
+        url = (
+            f"{GEOCODING_URL}?name={encoded}&count=1&language=zh&format=json"
+        )
+        self._request(url, "正在查询城市…")
+
+    def auto_detect(self) -> None:
+        self.pending_kind = "ip"
+        self.pending_query = ""
+        self._request(IP_LOCATION_URL, "正在根据公网 IP 识别城市…")
+
+    def _request(self, url: str, status: str) -> None:
+        if self.reply is not None and self.reply.isRunning():
+            return
+        self._set_busy(True)
+        self.status_label.setText(status)
+        request = QNetworkRequest(QUrl(url))
+        request.setRawHeader(b"User-Agent", b"FoxTodoWidget/1.0")
+        self.reply = self.network.get(request)
+        self.reply.finished.connect(self._on_reply_finished)
+
+    def _on_reply_finished(self) -> None:
+        reply = self.sender()
+        if not isinstance(reply, QNetworkReply):
+            return
+        try:
+            if reply.error() != QNetworkReply.NoError:
+                raise ValueError("location request failed")
+            payload = json.loads(bytes(reply.readAll()).decode("utf-8"))
+            location = self._parse_location(payload)
+            if location is None:
+                raise ValueError("location not found")
+            self.selected_location = location
+            self.status_label.setText(f"已找到：{location['name']}")
+            self.accept()
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError, UnicodeDecodeError):
+            self.status_label.setText("没有找到这个地点，请换个城市名或稍后再试")
+            self._set_busy(False)
+        finally:
+            if self.reply is reply:
+                self.reply = None
+            reply.deleteLater()
+
+    def _parse_location(self, payload: dict) -> dict | None:
+        if self.pending_kind == "geocode":
+            results = payload.get("results") or []
+            if not results:
+                return None
+            result = results[0]
+            return normalize_location(
+                {
+                    "name": self.pending_query,
+                    "latitude": result.get("latitude"),
+                    "longitude": result.get("longitude"),
+                }
+            )
+
+        if payload.get("success") is False:
+            return None
+        city = str(payload.get("city") or payload.get("region") or "").strip()
+        country = str(payload.get("country") or "").strip()
+        name = city or country
+        return normalize_location(
+            {
+                "name": name,
+                "latitude": payload.get("latitude"),
+                "longitude": payload.get("longitude"),
+            }
         )
 
 
@@ -965,7 +1198,11 @@ class MainWindow(QWidget):
         self.blink_timer: QTimer | None = None
         self.bubble_timer: QTimer | None = None
         self.weather_reply: QNetworkReply | None = None
-        self.weather_location = FIXED_WEATHER_LOCATION
+        self.location = normalize_location(state.get("location"))
+        initial_location = self.location or DEFAULT_LOCATION
+        self.weather_location = initial_location["name"]
+        self.weather_latitude = initial_location["latitude"]
+        self.weather_longitude = initial_location["longitude"]
         self.weather_condition = ""
         self.memo_save_timer: QTimer | None = None
 
@@ -1027,6 +1264,8 @@ class MainWindow(QWidget):
         self.weather_timer.timeout.connect(self.refresh_weather)
         self.weather_timer.start(15 * 60 * 1000)
         QTimer.singleShot(120, self.refresh_weather)
+        if self.location is None and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            QTimer.singleShot(0, self.ensure_location)
 
         guard.show_requested.connect(self.restore_and_raise)
         QTimer.singleShot(650, self.start_effects)
@@ -1078,11 +1317,13 @@ class MainWindow(QWidget):
         self.date_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.date_label.setFont(font(9))
         self.date_label.setStyleSheet(f"color: {PALETTE['brown_soft']}; background: transparent;")
-        self.weather_label = QLabel("地点 · 获取中…")
+        self.weather_label = ClickableLabel(self.card)
+        self.weather_label.setText("地点 · 获取中…")
         self.weather_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.weather_label.setFont(font(9, QFont.Bold))
         self.weather_label.setStyleSheet(f"color: {PALETTE['orange_dark']}; background: transparent;")
-        self.weather_label.setToolTip("正在读取天气；联网失败时会显示为 —")
+        self.weather_label.setToolTip("点击修改天气地点；联网失败时会显示为 —")
+        self.weather_label.clicked.connect(self.open_location_dialog)
         clock_column.addWidget(self.clock_label)
         clock_column.addWidget(self.date_label)
         clock_column.addWidget(self.weather_label)
@@ -1717,14 +1958,42 @@ class MainWindow(QWidget):
         if self.bubble.isVisible():
             self.update_bubble_text()
 
+    def ensure_location(self) -> None:
+        if self.location is not None:
+            return
+        dialog = LocationDialog(self, DEFAULT_LOCATION)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_location is not None:
+            self.apply_location(dialog.selected_location)
+        else:
+            self.apply_location(DEFAULT_LOCATION)
+
+    def open_location_dialog(self) -> None:
+        dialog = LocationDialog(self, self.location or DEFAULT_LOCATION)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_location is not None:
+            self.apply_location(dialog.selected_location)
+
+    def apply_location(self, location: dict) -> None:
+        normalized = normalize_location(location)
+        if normalized is None:
+            return
+        self.location = normalized
+        self.state["location"] = normalized
+        self.weather_location = normalized["name"]
+        self.weather_latitude = normalized["latitude"]
+        self.weather_longitude = normalized["longitude"]
+        self.weather_condition = ""
+        self.save()
+        self.update_weather_label()
+        self.refresh_weather()
+
     def refresh_weather(self) -> None:
-        """Read current weather for the fixed Fuzhou Gulou location."""
+        """Read current weather for the selected city."""
         if self.weather_reply is not None and self.weather_reply.isRunning():
             return
         request = QNetworkRequest(
             QUrl(
                 "https://api.open-meteo.com/v1/forecast"
-                f"?latitude={WEATHER_LATITUDE}&longitude={WEATHER_LONGITUDE}"
+                f"?latitude={self.weather_latitude}&longitude={self.weather_longitude}"
                 "&current=temperature_2m,weather_code&timezone=Asia%2FShanghai"
             )
         )
@@ -1736,7 +2005,7 @@ class MainWindow(QWidget):
         condition = self.weather_condition or "获取中…"
         self.weather_label.setText(f"{self.weather_location} · {condition}")
         self.weather_label.setToolTip(
-            f"天气地点：{self.weather_location}；天气来自鼓楼区坐标实时天气"
+            f"天气地点：{self.weather_location}；点击可切换城市"
         )
 
     def on_weather_finished(self) -> None:
