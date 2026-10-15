@@ -44,6 +44,7 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QDialog,
     QFrame,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -69,6 +70,8 @@ DATA_DIR = os.path.join(APP_DIR, "data")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
 ASSET_DIR = os.path.join(RESOURCE_DIR, "assets")
+CUSTOM_CHARACTER_FILENAME = "custom_fox.png"
+CHARACTER_MODE_KEYS = {"carousel", "normal", "smile", "wink", "custom"}
 INSTANCE_NAME = "fox_todo_widget_single_instance_v1"
 MUTEX_NAME = "FoxTodoWidgetMutexV1"
 DEFAULT_LOCATION = {
@@ -128,6 +131,15 @@ def format_memo_timestamp(value: str) -> str:
     return parsed.strftime("%m月%d日 %H:%M")
 
 
+def normalize_character_mode(value: object) -> str:
+    mode = str(value or "carousel").strip().lower()
+    return mode if mode in CHARACTER_MODE_KEYS else "carousel"
+
+
+def custom_character_path() -> str:
+    return os.path.join(DATA_DIR, CUSTOM_CHARACTER_FILENAME)
+
+
 def normalize_location(value: object) -> dict | None:
     if not isinstance(value, dict):
         return None
@@ -151,6 +163,7 @@ def default_state() -> dict:
         "active_memo_id": None,
         "memo_mode": False,
         "location": None,
+        "character_mode": "carousel",
     }
 
 
@@ -173,6 +186,7 @@ def load_state() -> dict:
         state["active_memo_id"] = raw.get("active_memo_id")
         state["memo_mode"] = bool(raw.get("memo_mode", False))
         state["location"] = normalize_location(raw.get("location"))
+        state["character_mode"] = normalize_character_mode(raw.get("character_mode"))
         if state["active_tab"] not in {"todo", "done", "habit"}:
             state["active_tab"] = "todo"
         if isinstance(todos, list):
@@ -363,6 +377,7 @@ class ResizeGrip(QWidget):
 
 class CharacterLabel(QLabel):
     clicked = pyqtSignal()
+    settings_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -374,6 +389,10 @@ class CharacterLabel(QLabel):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        self.settings_requested.emit()
+        event.accept()
 
 
 class ClickableLabel(QLabel):
@@ -533,6 +552,107 @@ class FlatButton(QPushButton):
             QPushButton:pressed {{ background: {PALETTE['line']}; }}
             """
         )
+
+
+class ImageModeDialog(QDialog):
+    """Choose a built-in fox pose or replace it with a local image."""
+
+    MODE_OPTIONS = (
+        ("carousel", "自动轮播", "三张小狐狸自然切换并偶尔眨眼"),
+        ("normal", "经典小狐狸", "固定使用标准小狐狸"),
+        ("smile", "开心小狐狸", "固定使用开心表情"),
+        ("wink", "眨眼小狐狸", "固定使用眨眼表情"),
+    )
+
+    def __init__(self, parent: QWidget | None = None, current_mode: str = "carousel") -> None:
+        super().__init__(parent)
+        self.selected_mode: str | None = None
+        self.selected_path = ""
+        current_mode = normalize_character_mode(current_mode)
+
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setFixedSize(350, 315)
+
+        panel = QFrame(self)
+        panel.setGeometry(0, 0, 350, 315)
+        panel.setStyleSheet(
+            f"QFrame {{ background: {PALETTE['card']}; border: 1px solid {PALETTE['line']}; "
+            "border-radius: 22px; }}"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(22, 16, 22, 18)
+        layout.setSpacing(7)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("小狐狸图片模式", panel)
+        title.setFont(font(15, QFont.Bold))
+        title.setStyleSheet(f"color: {PALETTE['brown']}; background: transparent;")
+        header.addWidget(title, 1)
+        close_button = FlatButton("×", panel)
+        close_button.setFixedSize(26, 26)
+        close_button.setFont(font(17, QFont.Normal))
+        close_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['brown_soft']}; background: transparent; "
+            "border: none; border-radius: 13px; padding: 0; }"
+            f"QPushButton:hover {{ background: {PALETTE['peach']}; }}"
+        )
+        close_button.clicked.connect(self.reject)
+        header.addWidget(close_button)
+        layout.addLayout(header)
+
+        subtitle = QLabel("右键狐狸即可再次打开；自定义图片会保存到本机", panel)
+        subtitle.setFont(font(9))
+        subtitle.setStyleSheet(f"color: {PALETTE['muted']}; background: transparent;")
+        layout.addWidget(subtitle)
+
+        self.mode_buttons: dict[str, QPushButton] = {}
+        for key, label, description in self.MODE_OPTIONS:
+            button = QPushButton(label, panel)
+            button.setCheckable(True)
+            button.setChecked(key == current_mode)
+            button.setFixedHeight(35)
+            button.setFont(font(10, QFont.Bold))
+            button.setToolTip(description)
+            button.setStyleSheet(
+                f"QPushButton {{ color: {PALETTE['brown_soft']}; background: {PALETTE['cream']}; "
+                f"border: 1px solid {PALETTE['line']}; border-radius: 14px; text-align: left; padding: 0 13px; }}"
+                f"QPushButton:hover {{ background: {PALETTE['peach']}; border-color: {PALETTE['orange']}; }}"
+                f"QPushButton:checked {{ color: {PALETTE['white']}; background: {PALETTE['orange']}; "
+                "border-color: transparent; }}"
+            )
+            button.clicked.connect(lambda _checked=False, selected=key: self.choose_builtin(selected))
+            self.mode_buttons[key] = button
+            layout.addWidget(button)
+
+        custom_button = FlatButton("选择本地图片…", panel)
+        custom_button.setFixedHeight(32)
+        custom_button.setFont(font(10, QFont.Bold))
+        custom_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['orange_dark']}; background: {PALETTE['peach']}; "
+            f"border: 1px solid {PALETTE['line']}; border-radius: 14px; padding: 0 12px; }}"
+            f"QPushButton:hover {{ background: {PALETTE['orange']}; color: {PALETTE['white']}; }}"
+        )
+        custom_button.clicked.connect(self.choose_custom)
+        layout.addWidget(custom_button)
+
+    def choose_builtin(self, mode: str) -> None:
+        self.selected_mode = mode
+        self.accept()
+
+    def choose_custom(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择小狐狸图片",
+            "",
+            "图片文件 (*.png *.jpg *.jpeg *.webp *.bmp *.gif)",
+        )
+        if path:
+            self.selected_mode = "custom"
+            self.selected_path = path
+            self.accept()
 
 
 class LocationDialog(QDialog):
@@ -1185,6 +1305,8 @@ class MainWindow(QWidget):
         self.active_tab = state.get("active_tab", "todo")
         self.active_memo_id = state.get("active_memo_id")
         self.memo_mode = bool(state.get("memo_mode", False) and self.active_memo_id)
+        self.character_mode = normalize_character_mode(state.get("character_mode"))
+        self.custom_character_path = custom_character_path()
         self.collapsed = False
         self.collapsed_side = "left"
         self.dragging = False
@@ -1229,13 +1351,17 @@ class MainWindow(QWidget):
         self.character = CharacterLabel(self)
         self.character.setGeometry(MEMO_RAIL_WIDTH + 3, 0, 112, 112)
         self.character.clicked.connect(self.on_character_clicked)
+        self.character.settings_requested.connect(self.open_character_settings)
+        self.character.setToolTip("左键查看台词；右键更换小狐狸图片")
 
         self.money_effect = MoneyEffect(self)
         self.money_effect.setGeometry(MEMO_RAIL_WIDTH, 0, CARD_WIDTH, WINDOW_HEIGHT)
         self.money_effect.hide()
 
         self.character_pixmaps = self.load_character_pixmaps()
-        self.set_character_frame(0)
+        self.custom_character_pixmap = QPixmap()
+        if not self.set_character_mode(self.character_mode, persist=False):
+            self.set_character_mode("carousel", persist=False)
         self.memo_rail = MemoRail(self)
         self.memo_rail.memo_selected.connect(self.enter_memo)
         self.memo_rail.memo_added.connect(self.add_memo)
@@ -1281,6 +1407,65 @@ class MainWindow(QWidget):
         ]
         pixmaps = [QPixmap(path) for path in paths]
         return [pixmap for pixmap in pixmaps if not pixmap.isNull()]
+
+    def active_character_pixmaps(self) -> list[QPixmap]:
+        if self.character_mode == "custom" and not self.custom_character_pixmap.isNull():
+            return [self.custom_character_pixmap]
+        fixed_index = {"normal": 0, "smile": 1, "wink": 2}.get(self.character_mode)
+        if fixed_index is not None and fixed_index < len(self.character_pixmaps):
+            return [self.character_pixmaps[fixed_index]]
+        return self.character_pixmaps
+
+    def update_character_tooltip(self) -> None:
+        labels = {
+            "carousel": "自动轮播",
+            "normal": "经典小狐狸",
+            "smile": "开心小狐狸",
+            "wink": "眨眼小狐狸",
+            "custom": "自定义小狐狸",
+        }
+        if hasattr(self, "character"):
+            self.character.setToolTip(
+                f"当前：{labels.get(self.character_mode, '小狐狸')}\n左键查看台词；右键更换图片模式"
+            )
+
+    def set_character_mode(
+        self,
+        mode: str,
+        custom_source: str = "",
+        persist: bool = True,
+    ) -> bool:
+        mode = normalize_character_mode(mode)
+        if mode == "custom":
+            try:
+                if custom_source:
+                    source_pixmap = QPixmap(custom_source)
+                    if source_pixmap.isNull():
+                        return False
+                    ensure_data_dir()
+                    if not source_pixmap.save(self.custom_character_path, "PNG"):
+                        return False
+                self.custom_character_pixmap = QPixmap(self.custom_character_path)
+            except (OSError, TypeError):
+                return False
+            if self.custom_character_pixmap.isNull():
+                return False
+
+        self.character_mode = mode
+        self.carousel_index = 0
+        self.set_character_frame(0)
+        if hasattr(self, "carousel_timer"):
+            if mode == "carousel" and self.effect_started:
+                if not self.carousel_timer.isActive():
+                    self.carousel_timer.start(7200)
+                self.schedule_blink()
+            else:
+                self.carousel_timer.stop()
+        self.update_character_tooltip()
+        if persist:
+            self.state["character_mode"] = mode
+            self.save()
+        return True
 
     def build_ui(self) -> None:
         layout = QVBoxLayout(self.card)
@@ -2102,6 +2287,13 @@ class MainWindow(QWidget):
         self.bubble_timer.timeout.connect(self.bubble.hide)
         self.bubble_timer.start(5000)
 
+    def open_character_settings(self) -> None:
+        dialog = ImageModeDialog(self, self.character_mode)
+        if dialog.exec_() != QDialog.Accepted or not dialog.selected_mode:
+            return
+        if not self.set_character_mode(dialog.selected_mode, custom_source=dialog.selected_path):
+            self.character.setToolTip("自定义图片读取失败，请重新选择图片")
+
     def start_effects(self) -> None:
         if self.effect_started or not self.character_pixmaps:
             return
@@ -2116,8 +2308,9 @@ class MainWindow(QWidget):
 
         self.carousel_timer = QTimer(self)
         self.carousel_timer.timeout.connect(self.next_character_frame)
-        self.carousel_timer.start(7200)
-        self.schedule_blink()
+        if self.character_mode == "carousel":
+            self.carousel_timer.start(7200)
+            self.schedule_blink()
 
     def update_float(self) -> None:
         if self.collapsed:
@@ -2127,27 +2320,30 @@ class MainWindow(QWidget):
         self.float_phase += 0.11
 
     def set_character_frame(self, index: int, update_carousel: bool = True) -> None:
-        if not self.character_pixmaps:
+        pixmaps = self.active_character_pixmaps()
+        if not pixmaps:
             return
-        frame_index = index % len(self.character_pixmaps)
+        frame_index = index % len(pixmaps)
         if update_carousel:
             self.carousel_index = frame_index
-        pixmap = self.character_pixmaps[frame_index]
+        pixmap = pixmaps[frame_index]
         self.character.setPixmap(
             pixmap.scaled(self.character.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
 
     def next_character_frame(self) -> None:
+        if self.character_mode != "carousel":
+            return
         self.set_character_frame(self.carousel_index + 1)
 
     def schedule_blink(self) -> None:
-        if not self.effect_started:
+        if not self.effect_started or self.character_mode != "carousel":
             return
         delay = random.randint(3600, 6400)
         QTimer.singleShot(delay, self.do_blink)
 
     def do_blink(self) -> None:
-        if not self.effect_started:
+        if not self.effect_started or self.character_mode != "carousel":
             return
         carousel_frame = self.carousel_index
         blink_frame = 1 if len(self.character_pixmaps) > 1 and random.random() < 0.55 else 2
