@@ -1,0 +1,20 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# Local runtime data and generated work logs
+data/*
+!data/.gitkeep
+exports/*
+!exports/.gitkeep
+
+# Windows and editor files
+*.lnk
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
