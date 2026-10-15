@@ -94,7 +94,7 @@ COLLAPSED_HEIGHT = 132
 COLLAPSED_MARGIN = 8
 RESIZE_GRIP_SIZE = 8
 
-PALETTE = {
+DEFAULT_PALETTE = {
     "card": "#fff9f1",
     "card_shadow": "#ead7c6",
     "orange": "#ef984e",
@@ -109,6 +109,7 @@ PALETTE = {
     "peach": "#fff0e2",
     "muted": "#bca79b",
 }
+PALETTE = DEFAULT_PALETTE.copy()
 
 
 def ensure_data_dir() -> None:
@@ -138,6 +139,130 @@ def normalize_character_mode(value: object) -> str:
 
 def custom_character_path() -> str:
     return os.path.join(DATA_DIR, CUSTOM_CHARACTER_FILENAME)
+
+
+def clamp_int(value: float, minimum: int, maximum: int) -> int:
+    return max(minimum, min(maximum, int(round(value))))
+
+
+def mix_colors(base: QColor, tint: QColor, tint_ratio: float) -> QColor:
+    ratio = max(0.0, min(1.0, tint_ratio))
+    inverse = 1.0 - ratio
+    return QColor(
+        clamp_int(base.red() * inverse + tint.red() * ratio, 0, 255),
+        clamp_int(base.green() * inverse + tint.green() * ratio, 0, 255),
+        clamp_int(base.blue() * inverse + tint.blue() * ratio, 0, 255),
+    )
+
+
+def dominant_character_color(pixmap: QPixmap | None) -> QColor:
+    """Pick a saturated, non-transparent image color suitable for a UI accent."""
+    fallback = QColor(DEFAULT_PALETTE["orange"])
+    if pixmap is None or pixmap.isNull():
+        return fallback
+
+    image = pixmap.toImage()
+    if image.isNull():
+        return fallback
+    sample = image.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    buckets: dict[tuple[int, int, int], list[float]] = {}
+    neutral_samples: list[tuple[int, int, int, float]] = []
+
+    for y in range(sample.height()):
+        for x in range(sample.width()):
+            color = sample.pixelColor(x, y)
+            alpha = color.alpha()
+            if alpha < 30:
+                continue
+            hue, saturation, value, _ = color.getHsv()
+            if value < 28:
+                continue
+            if saturation < 30:
+                if value < 235:
+                    neutral_samples.append((color.red(), color.green(), color.blue(), alpha / 255.0))
+                continue
+
+            weight = (alpha / 255.0) * (0.35 + saturation / 255.0 * 2.0) * (0.35 + value / 255.0)
+            key = (hue // 12, min(7, saturation // 32), min(7, value // 32))
+            bucket = buckets.setdefault(key, [0.0, 0.0, 0.0, 0.0])
+            bucket[0] += color.red() * weight
+            bucket[1] += color.green() * weight
+            bucket[2] += color.blue() * weight
+            bucket[3] += weight
+
+    if buckets:
+        picked = max(buckets.values(), key=lambda values: values[3])
+        accent = QColor(
+            clamp_int(picked[0] / picked[3], 0, 255),
+            clamp_int(picked[1] / picked[3], 0, 255),
+            clamp_int(picked[2] / picked[3], 0, 255),
+        )
+    elif neutral_samples:
+        total = sum(item[3] for item in neutral_samples)
+        accent = QColor(
+            clamp_int(sum(item[0] * item[3] for item in neutral_samples) / total, 0, 255),
+            clamp_int(sum(item[1] * item[3] for item in neutral_samples) / total, 0, 255),
+            clamp_int(sum(item[2] * item[3] for item in neutral_samples) / total, 0, 255),
+        )
+    else:
+        accent = fallback
+
+    hue, saturation, value, _ = accent.getHsv()
+    if hue < 0:
+        return fallback
+    return QColor.fromHsv(
+        hue,
+        clamp_int(max(saturation, 105), 105, 225),
+        clamp_int(value, 145, 225),
+    )
+
+
+def palette_from_character(pixmap: QPixmap | None) -> dict[str, str]:
+    """Create a soft, readable palette from the selected character image."""
+    if pixmap is None or pixmap.isNull():
+        return DEFAULT_PALETTE.copy()
+
+    accent = dominant_character_color(pixmap)
+    hue, saturation, value, _ = accent.getHsv()
+    dark_text = QColor("#2e2732")
+    soft_text = QColor("#66545d")
+    secondary_hue = (hue + 155) % 360
+    secondary = QColor.fromHsv(
+        secondary_hue,
+        clamp_int(saturation * 0.58, 45, 125),
+        clamp_int(value - 10, 155, 220),
+    )
+    secondary_dark = QColor.fromHsv(
+        secondary_hue,
+        clamp_int(saturation * 0.78, 70, 175),
+        clamp_int(value - 48, 105, 185),
+    )
+    orange_dark = QColor.fromHsv(
+        hue,
+        clamp_int(saturation + 18, 110, 245),
+        clamp_int(value - 48, 90, 185),
+    )
+
+    return {
+        "card": mix_colors(accent, QColor("#ffffff"), 0.91).name(),
+        "card_shadow": mix_colors(accent, soft_text, 0.56).name(),
+        "orange": accent.name(),
+        "orange_dark": orange_dark.name(),
+        "brown": mix_colors(dark_text, accent, 0.18).name(),
+        "brown_soft": mix_colors(soft_text, accent, 0.24).name(),
+        "cream": mix_colors(accent, QColor("#ffffff"), 0.965).name(),
+        "white": "#ffffff",
+        "line": mix_colors(accent, QColor("#ffffff"), 0.70).name(),
+        "mint": mix_colors(secondary, QColor("#ffffff"), 0.48).name(),
+        "mint_dark": secondary_dark.name(),
+        "peach": mix_colors(accent, QColor("#ffffff"), 0.82).name(),
+        "muted": mix_colors(soft_text, accent, 0.12).name(),
+    }
+
+
+def update_global_palette(palette: dict[str, str]) -> None:
+    PALETTE.clear()
+    PALETTE.update(palette)
 
 
 def normalize_location(value: object) -> dict | None:
@@ -430,13 +555,13 @@ class BookmarkRibbon(QWidget):
                 QPointF(8, height - 12),
             ]
         )
-        painter.setPen(QColor("#e5a05e"))
-        painter.setBrush(QColor("#f7c47f"))
+        painter.setPen(QColor(PALETTE["orange_dark"]))
+        painter.setBrush(QColor(PALETTE["orange"]))
         painter.drawPolygon(ribbon)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#fff1d7"))
+        painter.setBrush(QColor(PALETTE["cream"]))
         painter.drawRoundedRect(QRectF(18, 12, width - 36, 7), 3.5, 3.5)
-        painter.setBrush(QColor("#eda35e"))
+        painter.setBrush(QColor(PALETTE["orange_dark"]))
         painter.drawEllipse(QRectF(width / 2 - 4, height - 39, 8, 8))
         painter.end()
 
@@ -495,7 +620,7 @@ class MoneyEffect(QWidget):
 
         # A tiny slot above the eyes makes the destination of the coins legible.
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#6a4035"))
+        painter.setBrush(QColor(PALETTE["brown"]))
         painter.drawRoundedRect(QRectF(50, 33, 15, 4), 2, 2)
 
         for coin in self.coins:
@@ -508,12 +633,16 @@ class MoneyEffect(QWidget):
             y = coin["start_y"] + (coin["target_y"] - coin["start_y"]) * eased
             y += math.sin(progress * math.pi) * coin["sway"]
             alpha = 255 if progress < 0.82 else int(255 * (1.0 - progress) / 0.18)
-            coin_color = QColor(248, 193, 65, max(0, alpha))
-            edge_color = QColor(206, 133, 35, max(0, alpha))
+            coin_color = QColor(PALETTE["orange"])
+            coin_color.setAlpha(max(0, alpha))
+            edge_color = QColor(PALETTE["orange_dark"])
+            edge_color.setAlpha(max(0, alpha))
             painter.setPen(edge_color)
             painter.setBrush(coin_color)
             painter.drawEllipse(QRectF(x - 8, y - 6, 16, 12))
-            painter.setPen(QColor(255, 239, 171, max(0, alpha)))
+            coin_highlight = QColor(PALETTE["cream"])
+            coin_highlight.setAlpha(max(0, alpha))
+            painter.setPen(coin_highlight)
             painter.setFont(font(8, QFont.Bold))
             painter.drawText(QRectF(x - 6, y - 5, 12, 10), Qt.AlignCenter, "¥")
 
@@ -524,10 +653,13 @@ class MoneyEffect(QWidget):
             lift = text_phase * 18.0
             painter.setFont(font(13, QFont.Bold))
             for x, y in ((166, 42), (211, 51)):
-                shadow = QColor(255, 255, 255, max(0, min(110, text_alpha)))
+                shadow = QColor(PALETTE["white"])
+                shadow.setAlpha(max(0, min(110, text_alpha)))
                 painter.setPen(shadow)
                 painter.drawText(QRectF(x + 1, y - lift + 1, 40, 22), Qt.AlignLeft, "钱来")
-                painter.setPen(QColor(239, 143, 67, max(0, text_alpha)))
+                money_text = QColor(PALETTE["orange_dark"])
+                money_text.setAlpha(max(0, text_alpha))
+                painter.setPen(money_text)
                 painter.drawText(QRectF(x, y - lift, 40, 22), Qt.AlignLeft, "钱来")
 
         painter.end()
@@ -890,6 +1022,7 @@ class MemoTagRow(QWidget):
         super().__init__(parent)
         self.memo_id = str(item["id"])
         self.current_label = str(item.get("label", "备忘"))
+        self.selected = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -934,6 +1067,7 @@ class MemoTagRow(QWidget):
         self.set_selected(False)
 
     def set_selected(self, selected: bool) -> None:
+        self.selected = selected
         if selected:
             self.tag_button.setStyleSheet(
                 f"QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['orange']}; "
@@ -981,11 +1115,11 @@ class MemoRail(QWidget):
         layout.setContentsMargins(3, 0, 2, 0)
         layout.setSpacing(5)
 
-        title = QLabel("备忘", self)
-        title.setAlignment(Qt.AlignCenter)
-        title.setFont(font(10, QFont.Bold))
-        title.setStyleSheet(f"color: {PALETTE['brown_soft']}; background: transparent;")
-        layout.addWidget(title)
+        self.title_label = QLabel("备忘", self)
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setFont(font(10, QFont.Bold))
+        self.title_label.setStyleSheet(f"color: {PALETTE['brown_soft']}; background: transparent;")
+        layout.addWidget(self.title_label)
 
         self.rows_host = QWidget(self)
         self.rows_host.setStyleSheet("background: transparent;")
@@ -1073,7 +1207,7 @@ class DayButton(QToolButton):
                 border-radius: 12px;
                 padding: 0;
             }}
-            QToolButton:hover {{ background: #ffe4cd; }}
+            QToolButton:hover {{ background: {PALETTE['line']}; }}
             QToolButton:checked {{
                 color: {PALETTE['white']};
                 background: {PALETTE['mint_dark']};
@@ -1307,6 +1441,7 @@ class MainWindow(QWidget):
         self.memo_mode = bool(state.get("memo_mode", False) and self.active_memo_id)
         self.character_mode = normalize_character_mode(state.get("character_mode"))
         self.custom_character_path = custom_character_path()
+        self.ui_ready = False
         self.collapsed = False
         self.collapsed_side = "left"
         self.dragging = False
@@ -1382,6 +1517,7 @@ class MainWindow(QWidget):
         self.bubble = SpeechBubble(self)
         self.bubble.setGeometry(MEMO_RAIL_WIDTH + 92, 93, 232, 65)
         self.bubble.hide()
+        self.ui_ready = True
 
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self.update_clock)
@@ -1452,6 +1588,11 @@ class MainWindow(QWidget):
                 return False
 
         self.character_mode = mode
+        update_global_palette(
+            palette_from_character(
+                self.custom_character_pixmap if mode == "custom" else None
+            )
+        )
         self.carousel_index = 0
         self.set_character_frame(0)
         if hasattr(self, "carousel_timer"):
@@ -1462,10 +1603,143 @@ class MainWindow(QWidget):
             else:
                 self.carousel_timer.stop()
         self.update_character_tooltip()
+        self.refresh_theme()
         if persist:
             self.state["character_mode"] = mode
             self.save()
         return True
+
+    def refresh_theme(self) -> None:
+        if not getattr(self, "ui_ready", False):
+            return
+
+        flat_button_style = f"""
+            QPushButton {{
+                color: {PALETTE['brown']};
+                background: transparent;
+                border: none;
+                border-radius: 12px;
+                padding: 0;
+            }}
+            QPushButton:hover {{ background: {PALETTE['peach']}; }}
+            QPushButton:pressed {{ background: {PALETTE['line']}; }}
+        """
+        self.min_button.setStyleSheet(flat_button_style)
+        self.close_button.setStyleSheet(flat_button_style)
+        self.clock_label.setStyleSheet(f"color: {PALETTE['brown']}; background: transparent;")
+        self.date_label.setStyleSheet(f"color: {PALETTE['brown_soft']}; background: transparent;")
+        self.weather_label.setStyleSheet(f"color: {PALETTE['orange_dark']}; background: transparent;")
+
+        for button in self.tab_buttons.values():
+            button.setStyleSheet(
+                f"""
+                QPushButton {{
+                    color: {PALETTE['brown_soft']};
+                    background: transparent;
+                    border: none;
+                    border-radius: 14px;
+                    padding: 0 6px;
+                }}
+                QPushButton:hover {{ background: {PALETTE['peach']}; }}
+                QPushButton:checked {{ color: {PALETTE['white']}; background: {PALETTE['orange']}; }}
+                """
+            )
+
+        self.progress_text.setStyleSheet(f"color: {PALETTE['brown_soft']}; background: transparent;")
+        self.progress_bar.setStyleSheet(
+            f"""
+            QProgressBar {{ background: {PALETTE['peach']}; border: none; border-radius: 3px; }}
+            QProgressBar::chunk {{ background: {PALETTE['orange']}; border-radius: 3px; }}
+            """
+        )
+
+        self.todo_input.setStyleSheet(
+            f"QLineEdit {{ color: {PALETTE['brown']}; background: {PALETTE['white']}; border: none; border-radius: 15px; padding: 0 12px; }}"
+        )
+        self.todo_add_button.setStyleSheet(
+            f"""
+            QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['orange']}; border: none; border-radius: 16px; }}
+            QPushButton:hover {{ background: {PALETTE['orange_dark']}; }}
+            """
+        )
+        self.habit_input.setStyleSheet(
+            f"QLineEdit {{ color: {PALETTE['brown']}; background: {PALETTE['white']}; border: none; border-radius: 15px; padding: 0 12px; }}"
+        )
+        self.habit_add_button.setStyleSheet(
+            f"""
+            QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['mint_dark']}; border: none; border-radius: 16px; }}
+            QPushButton:hover {{ background: {PALETTE['orange']}; }}
+            """
+        )
+
+        self.memo_back_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['orange_dark']}; background: {PALETTE['peach']}; "
+            "border: none; border-radius: 14px; padding: 0 5px; }"
+            f"QPushButton:hover {{ background: {PALETTE['line']}; }}"
+        )
+        self.memo_title.setStyleSheet(f"color: {PALETTE['brown']}; background: transparent;")
+        self.memo_updated.setStyleSheet(f"color: {PALETTE['muted']}; background: transparent;")
+        self.memo_export_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['mint_dark']}; "
+            "border: none; border-radius: 14px; padding: 0; }"
+            f"QPushButton:hover {{ background: {PALETTE['orange']}; }}"
+        )
+        self.memo_status.setStyleSheet(f"color: {PALETTE['muted']}; background: transparent;")
+        self.memo_editor.setStyleSheet(
+            f"""
+            QPlainTextEdit {{
+                color: {PALETTE['brown']};
+                background: {PALETTE['white']};
+                border: none;
+                border-radius: 15px;
+                padding: 10px;
+                selection-background-color: {PALETTE['peach']};
+            }}
+            QScrollBar:vertical {{ width: 4px; background: transparent; margin: 4px 0; }}
+            QScrollBar::handle:vertical {{ background: {PALETTE['card_shadow']}; border-radius: 2px; min-height: 22px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+            """
+        )
+
+        scroll_style = f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{ width: 4px; background: transparent; margin: 2px 0 2px 2px; }}
+            QScrollBar::handle:vertical {{ background: {PALETTE['card_shadow']}; border-radius: 2px; min-height: 22px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+        """
+        self.todo_scroll.setStyleSheet(scroll_style)
+        self.habit_scroll.setStyleSheet(scroll_style)
+
+        self.memo_rail.title_label.setStyleSheet(
+            f"color: {PALETTE['brown_soft']}; background: transparent;"
+        )
+        self.memo_rail.add_editor.setStyleSheet(
+            f"QLineEdit {{ color: {PALETTE['brown']}; background: {PALETTE['white']}; "
+            f"border: 1px solid {PALETTE['line']}; border-radius: 10px; padding: 0 4px; }}"
+        )
+        self.memo_rail.add_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['mint_dark']}; "
+            "border: none; border-radius: 14px; padding: 0; }"
+            f"QPushButton:hover {{ background: {PALETTE['orange']}; }}"
+        )
+
+        self.bubble.setStyleSheet(
+            f"QFrame {{ background: {PALETTE['white']}; border: 1px solid {PALETTE['line']}; border-radius: 15px; }}"
+        )
+        self.bubble.title.setStyleSheet(
+            f"color: {PALETTE['orange_dark']}; background: transparent;"
+        )
+        self.bubble.body.setStyleSheet(f"color: {PALETTE['brown']}; background: transparent;")
+        self.card.update()
+        self.bookmark.update()
+        self.money_effect.update()
+
+        self.memo_rail.render(self.state["memos"], self.active_memo_id)
+        self.render_todos()
+        self.render_habits()
+        self.update_progress()
 
     def build_ui(self) -> None:
         layout = QVBoxLayout(self.card)
@@ -1738,7 +2012,7 @@ class MainWindow(QWidget):
         self.habit_add_button.setStyleSheet(
             f"""
             QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['mint_dark']}; border: none; border-radius: 16px; }}
-            QPushButton:hover {{ background: #467f71; }}
+            QPushButton:hover {{ background: {PALETTE['orange']}; }}
             """
         )
         self.habit_add_button.clicked.connect(self.add_habit)
