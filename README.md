@@ -2,6 +2,10 @@
 
 一个面向 Windows 的本地桌面悬浮待办小组件。它使用 PyQt5 实现无边框透明窗口、置顶、拖动、边缘收起、待办、习惯打卡和可切换的备忘标签；狐狸会做轻微上下漂浮和眨眼，金币会落入储钱罐，“钱来”文字会轻轻浮动。
 
+## 效果预览
+
+![狐狸待办小组件效果图](docs/preview.png)
+
 ## 功能
 
 - 无边框、透明外部窗口、置顶、可拖动和自由调整大小。
@@ -60,6 +64,7 @@ exports/工作日志-20261015.md
 main.py                    主程序
 requirements.txt           Python 依赖
 assets/                    狐狸 PNG 素材
+docs/preview.png           GitHub README 效果预览图
 data/                      本地运行数据（不提交）
 exports/                   工作日志输出目录（不提交）
 安装依赖.bat               创建虚拟环境并安装依赖
