@@ -86,6 +86,9 @@ MEMO_RAIL_WIDTH = 78
 MIN_CARD_WIDTH = 300
 MIN_WINDOW_WIDTH = MEMO_RAIL_WIDTH + MIN_CARD_WIDTH
 MIN_WINDOW_HEIGHT = 330
+COLLAPSED_WIDTH = 132
+COLLAPSED_HEIGHT = 132
+COLLAPSED_MARGIN = 8
 RESIZE_GRIP_SIZE = 8
 
 PALETTE = {
@@ -2196,19 +2199,30 @@ class MainWindow(QWidget):
         self.bookmark.hide()
         self.memo_rail.hide()
         self.card.hide()
-        self.resize(110, 120)
-        self.character.setGeometry(0, 0, 110, 120)
+        # Keep the whole fox inside the compact window.  The old implementation
+        # deliberately left most of this window outside the screen edge, which
+        # made the collapsed state look like a pair of ears.
+        self.resize(COLLAPSED_WIDTH, COLLAPSED_HEIGHT)
+        self.character.setGeometry(0, 0, COLLAPSED_WIDTH, COLLAPSED_HEIGHT)
         self.set_character_frame(self.carousel_index)
+        self.character.raise_()
         screen = QApplication.screenAt(self.last_full_pos) or QApplication.primaryScreen()
         available = screen.availableGeometry()
-        y = max(available.top() + 20, min(self.y(), available.bottom() - 140))
-        x = available.left() - 68 if side == "left" else available.right() - 42
+        margin = COLLAPSED_MARGIN
+        min_x = available.left() + margin
+        max_x = available.right() - self.width() + 1 - margin
+        min_y = available.top() + margin
+        max_y = available.bottom() - self.height() + 1 - margin
+        x = max(min_x, min(self.x(), max_x))
+        y = max(min_y, min(self.y(), max_y))
+        if side == "left":
+            x = min_x
+        elif side == "right":
+            x = max_x
         if side == "top":
-            x = max(available.left() + 20, min(self.x(), available.right() - 130))
-            y = available.top() - 72
+            y = min_y
         elif side == "bottom":
-            x = max(available.left() + 20, min(self.x(), available.right() - 130))
-            y = available.bottom() - 48
+            y = max_y
         self.move(x, y)
         self.raise_()
 
