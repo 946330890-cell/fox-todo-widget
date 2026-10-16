@@ -2008,7 +2008,8 @@ class MainWindow(QWidget):
         layout.addWidget(header)
 
         self.drag_handle = DragHandle(self.card)
-        self.drag_handle.setGeometry(154, 0, 78, 58)
+        self.update_drag_handle_geometry()
+        QTimer.singleShot(0, self.update_drag_handle_geometry)
         self.drag_handle.drag_started.connect(self.begin_drag)
         self.drag_handle.drag_moved.connect(self.continue_drag)
         self.drag_handle.drag_finished.connect(self.finish_drag)
@@ -2059,6 +2060,26 @@ class MainWindow(QWidget):
         layout.addWidget(self.pages, 1)
 
         self.render_all()
+
+    def update_drag_handle_geometry(self) -> None:
+        """Keep the drag-only area clear of clickable header controls."""
+        if not all(
+            hasattr(self, name)
+            for name in ("drag_handle", "settings_button", "clock_label")
+        ):
+            return
+
+        settings_pos = self.settings_button.mapTo(self.card, QPoint(0, 0))
+        clock_pos = self.clock_label.mapTo(self.card, QPoint(0, 0))
+        left = settings_pos.x() + self.settings_button.width() + 6
+        right = clock_pos.x() - 6
+        if right <= left:
+            self.drag_handle.setGeometry(0, 0, 0, 0)
+            self.drag_handle.hide()
+            return
+
+        self.drag_handle.setGeometry(left, 0, right - left, 58)
+        self.drag_handle.show()
 
     def update_memo_rail_geometry(self) -> None:
         if not hasattr(self, "memo_rail") or self.collapsed:
@@ -2997,6 +3018,8 @@ class MainWindow(QWidget):
             self.money_effect.setGeometry(MEMO_RAIL_WIDTH, 0, card_width, self.height())
         if hasattr(self, "resize_grips"):
             self.update_resize_grips()
+        if hasattr(self, "drag_handle") and not self.collapsed:
+            self.update_drag_handle_geometry()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.save_current_memo()
