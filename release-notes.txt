@@ -9,3 +9,4 @@ On first launch, choose a city or use automatic IP-based city detection.
 Click the weather label later to change the city.
 
 Right-click the fox to choose automatic carousel, a fixed built-in expression, or a local custom image. The selected mode and custom image are saved on this computer, and custom images automatically drive the soft UI theme colors.
+Use the gear button in the header to set the daily after-work time. Custom images have connected near-white backgrounds removed and are cropped to the character content before display.

@@ -10,6 +10,7 @@ import os
 import random
 import sys
 import uuid
+from collections import deque
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -28,6 +29,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import (
     QColor,
     QFont,
+    QImage,
     QPainter,
     QPolygonF,
     QPixmap,
@@ -79,6 +81,7 @@ DEFAULT_LOCATION = {
     "latitude": 26.1025,
     "longitude": 119.2965,
 }
+DEFAULT_WORK_END_TIME = "18:30"
 IP_LOCATION_URL = "https://ipwho.is/"
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 CARD_WIDTH = 340
@@ -139,6 +142,21 @@ def normalize_character_mode(value: object) -> str:
 
 def custom_character_path() -> str:
     return os.path.join(DATA_DIR, CUSTOM_CHARACTER_FILENAME)
+
+
+def parse_work_end_time(value: object) -> str | None:
+    raw = str(value or "").strip()
+    parts = raw.split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return None
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_work_end_time(value: object) -> str:
+    return parse_work_end_time(value) or DEFAULT_WORK_END_TIME
 
 
 def clamp_int(value: float, minimum: int, maximum: int) -> int:
@@ -265,6 +283,93 @@ def update_global_palette(palette: dict[str, str]) -> None:
     PALETTE.update(palette)
 
 
+def is_light_background(color: QColor) -> bool:
+    return (
+        color.alpha() > 0
+        and min(color.red(), color.green(), color.blue()) >= 226
+        and max(color.red(), color.green(), color.blue())
+        - min(color.red(), color.green(), color.blue())
+        <= 30
+    )
+
+
+def prepare_character_pixmap(pixmap: QPixmap | None) -> QPixmap:
+    """Remove connected near-white background and crop transparent margins."""
+    if pixmap is None or pixmap.isNull():
+        return QPixmap()
+
+    image = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
+    width, height = image.width(), image.height()
+    if width <= 0 or height <= 0:
+        return QPixmap()
+    max_dimension = 1600
+    if max(width, height) > max_dimension:
+        image = image.scaled(
+            max_dimension,
+            max_dimension,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        width, height = image.width(), image.height()
+
+    visited = bytearray(width * height)
+    pending: deque[tuple[int, int]] = deque()
+
+    def enqueue_if_background(x: int, y: int) -> None:
+        index = y * width + x
+        if visited[index]:
+            return
+        visited[index] = 1
+        if is_light_background(image.pixelColor(x, y)):
+            pending.append((x, y))
+
+    for x in range(width):
+        enqueue_if_background(x, 0)
+        if height > 1:
+            enqueue_if_background(x, height - 1)
+    for y in range(1, height - 1):
+        enqueue_if_background(0, y)
+        if width > 1:
+            enqueue_if_background(width - 1, y)
+
+    while pending:
+        x, y = pending.popleft()
+        pixel = image.pixelColor(x, y)
+        pixel.setAlpha(0)
+        image.setPixelColor(x, y, pixel)
+        for next_x, next_y in (
+            (x - 1, y),
+            (x + 1, y),
+            (x, y - 1),
+            (x, y + 1),
+        ):
+            if 0 <= next_x < width and 0 <= next_y < height:
+                enqueue_if_background(next_x, next_y)
+
+    bounds = None
+    for y in range(height):
+        for x in range(width):
+            if image.pixelColor(x, y).alpha() > 10:
+                if bounds is None:
+                    bounds = [x, y, x, y]
+                else:
+                    bounds[0] = min(bounds[0], x)
+                    bounds[1] = min(bounds[1], y)
+                    bounds[2] = max(bounds[2], x)
+                    bounds[3] = max(bounds[3], y)
+
+    if bounds is None:
+        return QPixmap()
+
+    padding = max(4, int(min(width, height) * 0.025))
+    left = max(0, bounds[0] - padding)
+    top = max(0, bounds[1] - padding)
+    right = min(width - 1, bounds[2] + padding)
+    bottom = min(height - 1, bounds[3] + padding)
+    cropped = image.copy(left, top, right - left + 1, bottom - top + 1)
+    return QPixmap.fromImage(cropped)
+
+
 def normalize_location(value: object) -> dict | None:
     if not isinstance(value, dict):
         return None
@@ -289,6 +394,7 @@ def default_state() -> dict:
         "memo_mode": False,
         "location": None,
         "character_mode": "carousel",
+        "work_end_time": DEFAULT_WORK_END_TIME,
     }
 
 
@@ -312,6 +418,7 @@ def load_state() -> dict:
         state["memo_mode"] = bool(raw.get("memo_mode", False))
         state["location"] = normalize_location(raw.get("location"))
         state["character_mode"] = normalize_character_mode(raw.get("character_mode"))
+        state["work_end_time"] = normalize_work_end_time(raw.get("work_end_time"))
         if state["active_tab"] not in {"todo", "done", "habit"}:
             state["active_tab"] = "todo"
         if isinstance(todos, list):
@@ -785,6 +892,106 @@ class ImageModeDialog(QDialog):
             self.selected_mode = "custom"
             self.selected_path = path
             self.accept()
+
+
+class WorkTimeDialog(QDialog):
+    """Set the daily target time used by the fox's after-work countdown."""
+
+    def __init__(self, parent: QWidget | None = None, current_time: str = DEFAULT_WORK_END_TIME) -> None:
+        super().__init__(parent)
+        self.selected_time: str | None = None
+
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.setFixedSize(330, 220)
+
+        panel = QFrame(self)
+        panel.setGeometry(0, 0, 330, 220)
+        panel.setStyleSheet(
+            f"QFrame {{ background: {PALETTE['card']}; border: 1px solid {PALETTE['line']}; "
+            "border-radius: 22px; }}"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(22, 17, 22, 17)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("设置下班时间", panel)
+        title.setFont(font(15, QFont.Bold))
+        title.setStyleSheet(f"color: {PALETTE['brown']}; background: transparent;")
+        header.addWidget(title, 1)
+        close_button = FlatButton("×", panel)
+        close_button.setFixedSize(26, 26)
+        close_button.setFont(font(17, QFont.Normal))
+        close_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['brown_soft']}; background: transparent; "
+            "border: none; border-radius: 13px; padding: 0; }"
+            f"QPushButton:hover {{ background: {PALETTE['peach']}; }}"
+        )
+        close_button.clicked.connect(self.reject)
+        header.addWidget(close_button)
+        layout.addLayout(header)
+
+        subtitle = QLabel("狐狸会按照这个时间计算每日倒计时", panel)
+        subtitle.setFont(font(9))
+        subtitle.setStyleSheet(f"color: {PALETTE['muted']}; background: transparent;")
+        layout.addWidget(subtitle)
+
+        self.time_input = QLineEdit(panel)
+        self.time_input.setText(normalize_work_end_time(current_time))
+        self.time_input.setPlaceholderText("例如：18:30")
+        self.time_input.setAlignment(Qt.AlignCenter)
+        self.time_input.setMaxLength(5)
+        self.time_input.setFont(font(18, QFont.Bold))
+        self.time_input.setStyleSheet(
+            f"QLineEdit {{ color: {PALETTE['brown']}; background: {PALETTE['white']}; "
+            f"border: 1px solid {PALETTE['line']}; border-radius: 14px; padding: 6px; }}"
+            f"QLineEdit:focus {{ border: 1px solid {PALETTE['orange']}; }}"
+        )
+        self.time_input.returnPressed.connect(self.confirm)
+        layout.addWidget(self.time_input)
+
+        self.status_label = QLabel("格式：00:00 至 23:59", panel)
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setFont(font(8))
+        self.status_label.setStyleSheet(f"color: {PALETTE['muted']}; background: transparent;")
+        layout.addWidget(self.status_label)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
+        cancel_button = FlatButton("取消", panel)
+        cancel_button.setFixedHeight(30)
+        cancel_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['brown_soft']}; background: {PALETTE['cream']}; "
+            f"border: 1px solid {PALETTE['line']}; border-radius: 14px; padding: 0 14px; }}"
+            f"QPushButton:hover {{ background: {PALETTE['peach']}; }}"
+        )
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(cancel_button)
+        save_button = FlatButton("保存", panel)
+        save_button.setFixedHeight(30)
+        save_button.setStyleSheet(
+            f"QPushButton {{ color: {PALETTE['white']}; background: {PALETTE['orange']}; "
+            f"border: none; border-radius: 14px; padding: 0 18px; }}"
+            f"QPushButton:hover {{ background: {PALETTE['orange_dark']}; }}"
+        )
+        save_button.clicked.connect(self.confirm)
+        buttons.addWidget(save_button)
+        layout.addLayout(buttons)
+
+    def confirm(self) -> None:
+        selected = parse_work_end_time(self.time_input.text())
+        if selected is None:
+            self.status_label.setText("请输入正确时间，例如 18:30")
+            self.status_label.setStyleSheet(f"color: {PALETTE['orange_dark']}; background: transparent;")
+            self.time_input.setFocus()
+            self.time_input.selectAll()
+            return
+        self.selected_time = selected
+        self.accept()
 
 
 class LocationDialog(QDialog):
@@ -1440,6 +1647,7 @@ class MainWindow(QWidget):
         self.active_memo_id = state.get("active_memo_id")
         self.memo_mode = bool(state.get("memo_mode", False) and self.active_memo_id)
         self.character_mode = normalize_character_mode(state.get("character_mode"))
+        self.work_end_time = normalize_work_end_time(state.get("work_end_time"))
         self.custom_character_path = custom_character_path()
         self.ui_ready = False
         self.collapsed = False
@@ -1574,17 +1782,17 @@ class MainWindow(QWidget):
         mode = normalize_character_mode(mode)
         if mode == "custom":
             try:
-                if custom_source:
-                    source_pixmap = QPixmap(custom_source)
-                    if source_pixmap.isNull():
-                        return False
-                    ensure_data_dir()
-                    if not source_pixmap.save(self.custom_character_path, "PNG"):
-                        return False
-                self.custom_character_pixmap = QPixmap(self.custom_character_path)
+                source_pixmap = QPixmap(custom_source or self.custom_character_path)
+                if source_pixmap.isNull():
+                    return False
+                prepared_pixmap = prepare_character_pixmap(source_pixmap)
+                if prepared_pixmap.isNull():
+                    return False
+                ensure_data_dir()
+                if not prepared_pixmap.save(self.custom_character_path, "PNG"):
+                    return False
+                self.custom_character_pixmap = prepared_pixmap
             except (OSError, TypeError):
-                return False
-            if self.custom_character_pixmap.isNull():
                 return False
 
         self.character_mode = mode
@@ -1626,6 +1834,7 @@ class MainWindow(QWidget):
         """
         self.min_button.setStyleSheet(flat_button_style)
         self.close_button.setStyleSheet(flat_button_style)
+        self.settings_button.setStyleSheet(flat_button_style)
         self.clock_label.setStyleSheet(f"color: {PALETTE['brown']}; background: transparent;")
         self.date_label.setStyleSheet(f"color: {PALETTE['brown_soft']}; background: transparent;")
         self.weather_label.setStyleSheet(f"color: {PALETTE['orange_dark']}; background: transparent;")
@@ -1765,6 +1974,12 @@ class MainWindow(QWidget):
         self.close_button.setToolTip("关闭")
         self.close_button.clicked.connect(QApplication.instance().quit)
         header_layout.addWidget(self.close_button)
+        self.settings_button = FlatButton("⚙", header)
+        self.settings_button.setFixedSize(24, 24)
+        self.settings_button.setFont(font(14, QFont.Normal))
+        self.settings_button.setToolTip("设置下班时间")
+        self.settings_button.clicked.connect(self.open_work_time_dialog)
+        header_layout.addWidget(self.settings_button)
         header_layout.addStretch(1)
 
         clock_column = QVBoxLayout()
@@ -2420,6 +2635,22 @@ class MainWindow(QWidget):
         if self.bubble.isVisible():
             self.update_bubble_text()
 
+    def set_work_end_time(self, value: object) -> bool:
+        selected = parse_work_end_time(value)
+        if selected is None:
+            return False
+        self.work_end_time = selected
+        self.state["work_end_time"] = selected
+        self.save()
+        if self.bubble.isVisible():
+            self.update_bubble_text()
+        return True
+
+    def open_work_time_dialog(self) -> None:
+        dialog = WorkTimeDialog(self, self.work_end_time)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_time:
+            self.set_work_end_time(dialog.selected_time)
+
     def ensure_location(self) -> None:
         if self.location is not None:
             return
@@ -2529,7 +2760,8 @@ class MainWindow(QWidget):
 
     def update_bubble_text(self) -> None:
         now = datetime.now()
-        target = now.replace(hour=18, minute=30, second=0, microsecond=0)
+        hour, minute = (int(part) for part in self.work_end_time.split(":"))
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
         remaining = target - now
@@ -2544,7 +2776,7 @@ class MainWindow(QWidget):
                 "今天也要轻轻松松完成呀。",
             ]
         )
-        self.bubble.title.setText("距离下班")
+        self.bubble.title.setText(f"距离下班 · {self.work_end_time}")
         self.bubble.body.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}  ·  {quote}")
 
     def on_character_clicked(self) -> None:
